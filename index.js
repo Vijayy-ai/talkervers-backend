@@ -5,28 +5,36 @@ import voice from "elevenlabs-node";
 import express from "express";
 import { promises as fs } from "fs";
 import axios from "axios"; // Added axios
+import { CohereClient } from 'cohere-ai'; // Add this import
 dotenv.config();
 
 // Removed OpenAI import and initialization
 
-const axiosInstance = axios.create({
-  baseURL: `${process.env.AZURE_OPENAI_ENDPOINT}/openai/deployments/${process.env.AZURE_OPENAI_DEPLOYMENT_NAME}`,
-  headers: {
-    "api-key": process.env.AZURE_OPENAI_API_KEY,
-    "Content-Type": "application/json",
-  },
-  params: {
-    "api-version": process.env.AZURE_OPENAI_API_VERSION,
-  },
+const cohere = new CohereClient({
+  token: process.env.COHERE_API_KEY || "5azvP5mzQgJB2rUqoThepBwWABu6h8Hpo5poJ1XH",
 });
 
 const elevenLabsApiKey = process.env.ELEVEN_LABS_API_KEY;
-const voiceID = "kgG7dCoKCfLehAPWkJOE";
+const voiceID = "1qEiC6qsybMkmnNdVMbK"; // Your valid voice ID
 
 const app = express();
 app.use(express.json());
 app.use(cors());
 const port = 3000;
+
+const ensureDirectoriesExist = async () => {
+  try {
+    await fs.access('audios');
+  } catch {
+    await fs.mkdir('audios');
+  }
+  
+  try {
+    await fs.access('bin');
+  } catch {
+    await fs.mkdir('bin');
+  }
+};
 
 app.get("/", (req, res) => {
   res.send("Hello World!");
@@ -39,7 +47,11 @@ app.get("/voices", async (req, res) => {
 const execCommand = (command) => {
   return new Promise((resolve, reject) => {
     exec(command, (error, stdout, stderr) => {
-      if (error) reject(error);
+      if (error) {
+        console.error('Command stderr:', stderr);
+        reject(new Error(`${error.message}\nStderr: ${stderr}`));
+        return;
+      }
       resolve(stdout);
     });
   });
@@ -47,104 +59,146 @@ const execCommand = (command) => {
 
 const lipSyncMessage = async (message) => {
   const time = new Date().getTime();
-  console.log(`Starting conversion for message ${message}`);
-  await execCommand(
-    `ffmpeg -y -i audios/message_${message}.mp3 audios/message_${message}.wav`
-    // -y to overwrite the file
-  );
-  console.log(`Conversion done in ${new Date().getTime() - time}ms`);
-  await execCommand(
-    `./bin/rhubarb -f json -o audios/message_${message}.json audios/message_${message}.wav -r phonetic`
-  );
-  // -r phonetic is faster but less accurate
-  console.log(`Lip sync done in ${new Date().getTime() - time}ms`);
+  try {
+    console.log(`Starting conversion for message ${message}`);
+    
+    const basePath = process.cwd().replace(/\\/g, '/');
+    const inputWav = `${basePath}/audios/message_${message}.wav`;
+    const inputMp3 = `${basePath}/audios/message_${message}.mp3`;
+    const outputJson = `${basePath}/audios/message_${message}.json`;
+    
+    // Use ffmpeg from PATH for audio conversion
+    await execCommand(
+      `ffmpeg -y -i "${inputMp3}" "${inputWav}"`
+    );
+    console.log(`Conversion done in ${new Date().getTime() - time}ms`);
+    
+    // Use local rhubarb for lip sync
+    const rhubarbPath = `${basePath}/bin/rhubarb.exe`;
+    
+    // Verify rhubarb and its resources exist
+    try {
+      await fs.access(`${basePath}/bin/res/sphinx/acoustic-model/mdef`);
+    } catch (error) {
+      throw new Error('Rhubarb acoustic model files are missing. Please copy the complete res folder from Rhubarb distribution.');
+    }
+    
+    const command = `"${rhubarbPath}" -f json -o "${outputJson}" "${inputWav}" -r phonetic`;
+    console.log('Executing command:', command);
+    
+    await execCommand(command);
+    console.log(`Lip sync done in ${new Date().getTime() - time}ms`);
+  } catch (error) {
+    console.error('Error in lipSyncMessage:', error);
+    throw error;
+  }
 };
 
 app.post("/chat", async (req, res) => {
-  const userMessage = req.body.message;
-  if (!userMessage) {
-    res.send({
-      messages: [
-        {
-          text: "Hey dear... How was your day?",
-          audio: await audioFileToBase64("audios/intro_0.wav"),
-          lipsync: await readJsonTranscript("audios/intro_0.json"),
-          facialExpression: "smile",
-          animation: "Talking_1",
-        },
-        {
-          text: "it was well... Please tell me about your day too!",
-          audio: await audioFileToBase64("audios/intro_1.wav"),
-          lipsync: await readJsonTranscript("audios/intro_1.json"),
-          facialExpression: "sad",
-          animation: "Crying",
-        },
-      ],
+  try {
+    const userMessage = req.body.message;
+    if (!userMessage) {
+      res.send({
+        messages: [
+          {
+            text: "Hey dear... How was your day?",
+            audio: await audioFileToBase64("audios/intro_0.wav"),
+            lipsync: await readJsonTranscript("audios/intro_0.json"),
+            facialExpression: "smile",
+            animation: "Talking_1",
+          },
+          {
+            text: "it was well... Please tell me about your day too!",
+            audio: await audioFileToBase64("audios/intro_1.wav"),
+            lipsync: await readJsonTranscript("audios/intro_1.json"),
+            facialExpression: "sad",
+            animation: "Crying",
+          },
+        ],
+      });
+      return;
+    }
+    if (!elevenLabsApiKey) {
+      res.send({
+        messages: [
+          {
+            text: "Please my dear, don't forget to add your API keys!",
+            audio: await audioFileToBase64("audios/api_0.wav"),
+            lipsync: await readJsonTranscript("audios/api_0.json"),
+            facialExpression: "angry",
+            animation: "Angry",
+          },
+          {
+            text: "You don't want to ruin Wawa Sensei with a crazy ChatGPT and ElevenLabs bill, right?",
+            audio: await audioFileToBase64("audios/api_1.wav"),
+            lipsync: await readJsonTranscript("audios/api_1.json"),
+            facialExpression: "smile",
+            animation: "Laughing",
+          },
+        ],
+      });
+      return;
+    }
+
+    // Replace Azure OpenAI call with Cohere
+    const response = await cohere.generate({
+      model: 'command',  // or another appropriate Cohere model
+      prompt: `You are an empathetic assistant designed to engage users by detecting their emotional tone and mood through their input. Analyze each user's input to determine their emotional state—such as happiness, sadness, anger, or excitement—and respond with concise, emotionally appropriate replies that match the user's mood. Ensure your responses are brief, contextually relevant, and convey empathy, adapting your tone to align with the user's emotional state.
+
+The response should be a JSON array of messages (maximum 3 messages).
+Each message should have: text, facialExpression (smile/sad/angry/surprised/funnyFace/default), and animation (Talking_0/Talking_1/Talking_2/Crying/Laughing/Rumba/Idle/Terrified/Angry).
+
+User message: ${userMessage}`,
+      max_tokens: 300,
+      temperature: 0.6,
+      k: 0,
+      stop_sequences: [],
+      return_likelihoods: 'NONE'
     });
-    return;
-  }
-  if (!elevenLabsApiKey || openai.apiKey === "-") {
-    res.send({
-      messages: [
-        {
-          text: "Please my dear, don't forget to add your API keys!",
-          audio: await audioFileToBase64("audios/api_0.wav"),
-          lipsync: await readJsonTranscript("audios/api_0.json"),
-          facialExpression: "angry",
-          animation: "Angry",
-        },
-        {
-          text: "You don't want to ruin Wawa Sensei with a crazy ChatGPT and ElevenLabs bill, right?",
-          audio: await audioFileToBase64("audios/api_1.wav"),
-          lipsync: await readJsonTranscript("audios/api_1.json"),
-          facialExpression: "smile",
-          animation: "Laughing",
-        },
-      ],
+
+    let messages;
+    try {
+      // Parse the generated text as JSON
+      messages = JSON.parse(response.generations[0].text);
+      if (messages.messages) {
+        messages = messages.messages;
+      }
+    } catch (error) {
+      // Fallback in case the response isn't valid JSON
+      messages = [{
+        text: response.generations[0].text,
+        facialExpression: "default",
+        animation: "Talking_0"
+      }];
+    }
+
+    for (let i = 0; i < messages.length; i++) {
+      const message = messages[i];
+      try {
+        // generate audio file
+        const fileName = `audios/message_${i}.mp3`;
+        const textInput = message.text;
+        await voice.textToSpeech(elevenLabsApiKey, voiceID, fileName, textInput);
+        // generate lipsync
+        await lipSyncMessage(i);
+        message.audio = await audioFileToBase64(fileName);
+        message.lipsync = await readJsonTranscript(`audios/message_${i}.json`);
+      } catch (error) {
+        console.error('Error processing audio:', error);
+        // Fallback to no audio if there's an error
+        message.audio = null;
+        message.lipsync = null;
+      }
+    }
+
+    res.send({ messages });
+  } catch (error) {
+    console.error('Chat error:', error);
+    res.status(500).send({ 
+      error: 'An error occurred processing your request',
+      details: error.message 
     });
-    return;
   }
-
-  // Replace OpenAI API call with Axios request to Azure OpenAI
-  const response = await axiosInstance.post("/chat/completions", {
-    messages: [
-      {
-        role: "system",
-        content: `
-        You are an empathetic assistant designed to engage users by detecting their emotional tone and mood through their input. Analyze each user's input to determine their emotional state—such as happiness, sadness, anger, or excitement—and respond with concise, emotionally appropriate replies that match the user's mood. Ensure your responses are brief, contextually relevant, and convey empathy, adapting your tone to align with the user's emotional state.
-        You will always reply with a JSON array of messages. With a maximum of 3 messages.
-        Each message has a text, facialExpression, and animation property.
-        The different facial expressions are: smile, sad, angry, surprised, funnyFace, and default.
-        The different animations are: Talking_0, Talking_1, Talking_2, Crying, Laughing, Rumba, Idle, Terrified, and Angry.
-        `,
-      },
-      {
-        role: "user",
-        content: userMessage || "Hello",
-      },
-    ],
-    max_tokens: 1000,
-    temperature: 0.6,
-  });
-
-  let messages = response.data.choices[0].message.content;
-  messages = JSON.parse(messages);
-  if (messages.messages) {
-    messages = messages.messages; // ChatGPT is not 100% reliable, sometimes it directly returns an array and sometimes a JSON object with a messages property
-  }
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    // generate audio file
-    const fileName = `audios/message_${i}.mp3`; // The name of your audio file
-    const textInput = message.text; // The text you wish to convert to speech
-    await voice.textToSpeech(elevenLabsApiKey, voiceID, fileName, textInput);
-    // generate lipsync
-    await lipSyncMessage(i);
-    message.audio = await audioFileToBase64(fileName);
-    message.lipsync = await readJsonTranscript(`audios/message_${i}.json`);
-  }
-
-  res.send({ messages });
 });
 
 const readJsonTranscript = async (file) => {
@@ -157,6 +211,7 @@ const audioFileToBase64 = async (file) => {
   return data.toString("base64");
 };
 
-app.listen(port, () => {
-  console.log(`your virtual assisent lising on port ${port}`);
+app.listen(port, async () => {
+  await ensureDirectoriesExist();
+  console.log(`Your virtual assistant listening on port ${port}`);
 });
